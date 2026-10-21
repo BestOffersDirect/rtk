@@ -35,6 +35,14 @@ fn install_dotnet_stub(dir: &std::path::Path, body: &str) -> String {
 }
 
 #[cfg(unix)]
+fn pin_classic_runner(dir: &std::path::Path) {
+    // Keep these fixtures independent of any parent global.json or props file.
+    std::fs::write(dir.join("global.json"), "{}").expect("write classic global.json");
+    std::fs::write(dir.join("Directory.Build.props"), "")
+        .expect("write classic Directory.Build.props");
+}
+
+#[cfg(unix)]
 #[test]
 fn dotnet_test_reuses_users_double_dash_for_report_trx_injection() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -123,6 +131,7 @@ fn dotnet_test_reuses_users_double_dash_for_report_trx_injection() {
 #[test]
 fn dotnet_test_discovery_keeps_classic_native_names_and_exit_status() {
     let dir = tempfile::tempdir().expect("tempdir");
+    pin_classic_runner(dir.path());
     let argv_file = dir.path().join("argv.txt");
     let path_with_stub = install_dotnet_stub(
         dir.path(),
@@ -132,7 +141,7 @@ fn dotnet_test_discovery_keeps_classic_native_names_and_exit_status() {
         ),
     );
 
-    for discovery_arg in ["--list-tests", "-t"] {
+    for discovery_arg in ["--list-tests", "-t", "--LIST-TESTS", "-T"] {
         let out = common::rtk_command()
             .env("PATH", &path_with_stub)
             .current_dir(dir.path())
@@ -164,6 +173,74 @@ fn dotnet_test_discovery_keeps_classic_native_names_and_exit_status() {
             );
         }
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn dotnet_test_does_not_passthrough_non_discovery_switch_mutations() {
+    for switch in ["--t", "/t", "-list-tests", "--list-tests:true", "-t:true"] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        pin_classic_runner(dir.path());
+        let argv_file = dir.path().join("argv.txt");
+        let path_with_stub = install_dotnet_stub(
+            dir.path(),
+            &format!(
+                "printf '%s\\n' \"$@\" > {}\nexit 0",
+                shell_quote(&argv_file.display().to_string())
+            ),
+        );
+
+        let out = common::rtk_command()
+            .env("PATH", &path_with_stub)
+            .current_dir(dir.path())
+            .args(["dotnet", "test", switch])
+            .output()
+            .expect("spawn rtk");
+        assert!(
+            out.status.success(),
+            "normal test switch should run through RTK: switch={switch} stdout={} stderr={}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        let argv = std::fs::read_to_string(&argv_file).expect("read captured argv");
+        assert!(
+            argv.lines().any(|arg| arg == "--logger"),
+            "normal test switch must receive the classic TRX logger: switch={switch} argv={argv}"
+        );
+        assert!(
+            argv.lines().any(|arg| arg == "--results-directory"),
+            "normal test switch must receive the classic results directory: switch={switch} argv={argv}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn dotnet_build_target_switch_still_receives_binlog() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let argv_file = dir.path().join("argv.txt");
+    let path_with_stub = install_dotnet_stub(
+        dir.path(),
+        &format!(
+            "printf '%s\\n' \"$@\" > {}\nexit 0",
+            shell_quote(&argv_file.display().to_string())
+        ),
+    );
+
+    let out = common::rtk_command()
+        .env("PATH", &path_with_stub)
+        .current_dir(dir.path())
+        .args(["dotnet", "build", "-t"])
+        .output()
+        .expect("spawn rtk");
+    assert!(out.status.success());
+
+    let argv = std::fs::read_to_string(&argv_file).expect("read captured argv");
+    assert!(
+        argv.lines().any(|arg| arg.starts_with("-bl:")),
+        "dotnet build -t must stay on the build path and receive a binlog: {argv}"
+    );
 }
 
 #[cfg(unix)]
@@ -243,6 +320,7 @@ fn dotnet_test_discovery_preserves_native_error_and_exit_status() {
 #[test]
 fn dotnet_test_normal_run_keeps_existing_failure_summary_control() {
     let dir = tempfile::tempdir().expect("tempdir");
+    pin_classic_runner(dir.path());
     let fixture = include_str!("fixtures/dotnet/test_failed.txt");
     let path_with_stub = install_dotnet_stub(
         dir.path(),
@@ -269,6 +347,7 @@ fn dotnet_test_normal_run_keeps_existing_failure_summary_control() {
 #[test]
 fn dotnet_test_explicit_results_directory_is_retained_control() {
     let dir = tempfile::tempdir().expect("tempdir");
+    pin_classic_runner(dir.path());
     let results_dir = dir.path().join("user-results");
     let path_with_stub = install_dotnet_stub(
         dir.path(),
@@ -299,6 +378,7 @@ fn dotnet_test_explicit_results_directory_is_retained_control() {
 #[test]
 fn dotnet_test_relative_logger_report_keeps_native_default_artifact() {
     let dir = tempfile::tempdir().expect("tempdir");
+    pin_classic_runner(dir.path());
     let argv_file = dir.path().join("argv.txt");
     let path_with_stub = install_dotnet_stub(
         dir.path(),
@@ -348,8 +428,90 @@ fn dotnet_test_relative_logger_report_keeps_native_default_artifact() {
 
 #[cfg(unix)]
 #[test]
+fn dotnet_test_solution_root_reads_reported_trx_paths_and_retains_files() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    pin_classic_runner(dir.path());
+    let first_trx = dir.path().join("Tests/TestResults/Tests.trx");
+    let second_trx = dir.path().join("Tests2/TestResults/Tests2.trx");
+    let fallback_trx = dir.path().join("TestResults/fallback.trx");
+    let first_contents = r#"<?xml version="1.0" encoding="utf-8"?>
+<TestRun>
+  <Times start="2026-10-20T12:00:00.0000000+00:00" finish="2026-10-20T12:00:00.1000000+00:00" />
+  <ResultSummary><Counters total="1" executed="1" passed="0" failed="1" /></ResultSummary>
+  <Results><UnitTestResult testName="Tests.UnitTest1.FailsOnDemand" outcome="Failed"><Output><ErrorInfo><Message>asked to fail one</Message><StackTrace>at Tests.UnitTest1.FailsOnDemand()</StackTrace></ErrorInfo></Output></UnitTestResult></Results>
+</TestRun>"#;
+    let second_contents = r#"<?xml version="1.0" encoding="utf-8"?>
+<TestRun>
+  <Times start="2026-10-20T12:00:00.0000000+00:00" finish="2026-10-20T12:00:00.1000000+00:00" />
+  <ResultSummary><Counters total="1" executed="1" passed="0" failed="1" /></ResultSummary>
+  <Results><UnitTestResult testName="Tests2.UnitTest1.FailsOnDemand" outcome="Failed"><Output><ErrorInfo><Message>asked to fail two</Message><StackTrace>at Tests2.UnitTest1.FailsOnDemand()</StackTrace></ErrorInfo></Output></UnitTestResult></Results>
+</TestRun>"#;
+    let fallback_contents = r#"<?xml version="1.0" encoding="utf-8"?><TestRun><ResultSummary><Counters total="1" executed="1" passed="1" failed="0" /></ResultSummary><Results><UnitTestResult testName="Fallback.Tests.ShouldNotWin" outcome="Passed" /></Results></TestRun>"#;
+    let path_with_stub = install_dotnet_stub(
+        dir.path(),
+        &format!(
+            "mkdir -p {} {} {}\nprintf '%s' {} > {}\nprintf '%s' {} > {}\nprintf '%s' {} > {}\nprintf '%s\\n' 'Failed!' 'Total tests: 2' 'Results File: {}' 'Results File: {}' 'Results File: {}' 'Results File: {}'\nprintf '%s\\n' '[xUnit.net 00:00:00.01] Tests.UnitTest1.FailsOnDemand [FAIL]' 'asked to fail one' '[xUnit.net 00:00:00.01] Tests2.UnitTest1.FailsOnDemand [FAIL]' 'asked to fail two' >&2\nexit 1",
+            shell_quote(
+                &first_trx
+                    .parent()
+                    .expect("first parent")
+                    .display()
+                    .to_string()
+            ),
+            shell_quote(
+                &second_trx
+                    .parent()
+                    .expect("second parent")
+                    .display()
+                    .to_string()
+            ),
+            shell_quote(
+                &fallback_trx
+                    .parent()
+                    .expect("fallback parent")
+                    .display()
+                    .to_string()
+            ),
+            shell_quote(first_contents),
+            shell_quote(&first_trx.display().to_string()),
+            shell_quote(second_contents),
+            shell_quote(&second_trx.display().to_string()),
+            shell_quote(fallback_contents),
+            shell_quote(&fallback_trx.display().to_string()),
+            shell_quote(&first_trx.display().to_string()),
+            shell_quote(&first_trx.display().to_string()),
+            shell_quote(&second_trx.display().to_string()),
+            shell_quote(&second_trx.display().to_string()),
+        ),
+    );
+
+    let out = common::rtk_command()
+        .env("PATH", &path_with_stub)
+        .current_dir(dir.path())
+        .args(["dotnet", "test", "--logger", "trx", "-v", "q"])
+        .output()
+        .expect("spawn rtk");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let shown = format!("{stdout}\n{stderr}");
+
+    assert_eq!(out.status.code(), Some(1), "{shown}");
+    assert!(shown.contains("Tests.UnitTest1.FailsOnDemand"), "{shown}");
+    assert!(shown.contains("Tests2.UnitTest1.FailsOnDemand"), "{shown}");
+    assert!(shown.contains("asked to fail one"), "{shown}");
+    assert!(shown.contains("asked to fail two"), "{shown}");
+    assert!(shown.contains("in 2 projects"), "{shown}");
+    assert!(!shown.contains("Fallback.Tests.ShouldNotWin"), "{shown}");
+    assert!(first_trx.exists(), "native first TRX was removed");
+    assert!(second_trx.exists(), "native second TRX was removed");
+    assert!(fallback_trx.exists(), "fallback TRX was removed");
+}
+
+#[cfg(unix)]
+#[test]
 fn dotnet_test_owned_results_directory_is_cleaned_up_control() {
     let dir = tempfile::tempdir().expect("tempdir");
+    pin_classic_runner(dir.path());
     let argv_file = dir.path().join("argv.txt");
     let path_with_stub = install_dotnet_stub(
         dir.path(),

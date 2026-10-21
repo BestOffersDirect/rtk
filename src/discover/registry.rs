@@ -1604,22 +1604,18 @@ fn producer_output_is_line_faithful(rtk_cmd: &str, cmd: &str) -> bool {
     !is_bare_file_list(engine, &args)
 }
 
-/// True when `cmd` is a `git ls-tree` (after the `-C`/`-c` globals the git rule accepts)
-/// whose arguments rtk folds.
+/// True when `cmd` is a `git ls-tree` whose arguments rtk folds, using the classifier's
+/// git global-option pattern.
 fn git_ls_tree_folds(cmd: &str) -> bool {
-    let words = shell_split(cmd);
-    let mut rest = words.iter().skip(1);
-    loop {
-        match rest.next().map(String::as_str) {
-            Some("-C" | "-c") => {
-                rest.next();
-            }
-            Some("ls-tree") => break,
-            _ => return false,
-        }
+    let Some((_, args)) = cmd.split_once(char::is_whitespace) else {
+        return false;
+    };
+    let normalized = GIT_GLOBAL_OPT.replace(args.trim_start(), "");
+    let words = shell_split(&normalized);
+    if words.first().map(String::as_str) != Some("ls-tree") {
+        return false;
     }
-    let args: Vec<&String> = rest.collect();
-    crate::cmds::git::git_cmd::ls_tree_folds(&args)
+    crate::cmds::git::git_cmd::ls_tree_folds(&words[1..])
 }
 
 pub(crate) enum ExcludePattern {
@@ -4203,6 +4199,12 @@ mod tests {
             ("git ls-tree -r --name-only HEAD | cat", None),
             ("git ls-tree --name-status HEAD | tail -2", None),
             ("git -C src ls-tree -r --name-only HEAD | head -5", None),
+            ("yadm -C src ls-tree -r --name-only HEAD | head -5", None),
+            (
+                "yadm -c core.quotePath=false ls-tree -r --name-only HEAD | cat",
+                None,
+            ),
+            ("git\tls-tree -r --name-only HEAD | cat", None),
             (
                 "git ls-tree -r --name-only HEAD | while read f; do echo \"$f\"; done",
                 None,
@@ -4213,6 +4215,42 @@ mod tests {
                 expected,
                 "{cmd}"
             );
+        }
+    }
+
+    #[test]
+    fn test_rewrite_git_ls_tree_globals_preserve_pipeline_lines() {
+        for globals in [
+            "-c core.quotePath=false",
+            "-C src",
+            "--git-dir=.git",
+            "--git-dir .git",
+            "--work-tree=.",
+            "--work-tree .",
+            "--no-pager",
+            "--no-optional-locks",
+            "--bare",
+            "--literal-pathspecs",
+            "--no-pager -c core.quotePath=false",
+        ] {
+            for format in ["--name-only", "--name-status"] {
+                let cmd = format!("git {globals} ls-tree -r {format} HEAD");
+                assert_eq!(
+                    rewrite_command_no_prefixes(&cmd, &[]),
+                    Some(format!("rtk {cmd}")),
+                    "{cmd}"
+                );
+                for consumer in ["head -5", "tail -2", "cat"] {
+                    let piped = format!("{cmd} | {consumer}");
+                    assert_eq!(rewrite_command_no_prefixes(&piped, &[]), None, "{piped}");
+                    let raw = format!("git {globals} ls-tree -r -z {format} HEAD | {consumer}");
+                    assert_eq!(
+                        rewrite_command_no_prefixes(&raw, &[]),
+                        Some(format!("rtk {raw}")),
+                        "{raw}"
+                    );
+                }
+            }
         }
     }
 

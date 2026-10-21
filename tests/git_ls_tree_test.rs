@@ -2,7 +2,7 @@
 //! directory run and hands every other form through byte-identical to git.
 
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 mod common;
 
@@ -31,16 +31,30 @@ fn git(repo: &Path) -> Command {
 
 fn repo_with_awkward_paths() -> tempfile::TempDir {
     let repo = common::temp_git_repo();
-    for file in FILES {
-        let path = repo.path().join(file);
-        std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
-        std::fs::write(&path, "x\n").expect("write");
-    }
-    let add = git(repo.path())
-        .args(["add", "-A"])
+    let blob = git(repo.path())
+        .args(["hash-object", "-w", "--stdin"])
+        .stdin(Stdio::null())
         .output()
-        .expect("git add");
-    assert!(add.status.success(), "{add:?}");
+        .expect("git hash-object");
+    assert!(blob.status.success(), "{blob:?}");
+    let oid = String::from_utf8(blob.stdout).expect("object id");
+    for file in FILES {
+        // Git for Windows validates index paths too; these names never reach the filesystem.
+        let add = git(repo.path())
+            .args([
+                "-c",
+                "core.protectNTFS=false",
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                "100644",
+                oid.trim(),
+                file,
+            ])
+            .output()
+            .expect("git update-index");
+        assert!(add.status.success(), "{file:?}: {add:?}");
+    }
     let commit = git(repo.path())
         .args([
             "-c",
@@ -67,7 +81,7 @@ fn native_ls_tree(repo: &Path, args: &[&str]) -> Output {
     git(repo).args(args).output().expect("git ls-tree")
 }
 
-/// Reads a folded listing back into git's lines: `<dir>/ name…` (`./` for the top level), or
+/// Reads a folded listing back into git's lines: `<dir>/ name…` (`./` for no directory part), or
 /// a quoted path on its own line, verbatim when it holds a `\` escape and unwrapped otherwise.
 fn unfold(folded: &str) -> String {
     let mut paths = String::new();
@@ -126,6 +140,26 @@ fn name_only_listing_folds_and_every_path_rebuilds() {
             folded.contains("\"dir with space/a.rs\"\n"),
             "{args:?}:\n{folded}"
         );
+    }
+}
+
+#[test]
+fn current_directory_tree_entry_is_byte_identical_to_git() {
+    let repo = repo_with_awkward_paths();
+    let subdir = repo.path().join("src");
+    std::fs::create_dir(&subdir).expect("create working subdirectory");
+    for args in [
+        &["ls-tree", "-t", "-r", "--name-only", "HEAD"][..],
+        &["ls-tree", "-d", "-r", "--name-only", "HEAD"],
+        &["ls-tree", "-t", "-r", "--name-only", "HEAD", "."],
+    ] {
+        let native = native_ls_tree(&subdir, args);
+        assert!(native.status.success(), "{args:?}: {native:?}");
+        assert!(native.stdout.starts_with(b"./\n"), "{args:?}: {native:?}");
+        let rtk = rtk_ls_tree(&subdir, args);
+        assert_eq!(rtk.status.code(), native.status.code(), "{args:?}");
+        assert_eq!(rtk.stdout, native.stdout, "{args:?}");
+        assert_eq!(rtk.stderr, native.stderr, "{args:?}");
     }
 }
 

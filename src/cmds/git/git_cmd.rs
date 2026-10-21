@@ -3832,7 +3832,7 @@ pub(crate) fn ls_tree_folds<T: AsRef<str>>(args: &[T]) -> bool {
 }
 
 /// Folds a `git ls-tree --name-only` listing into one line per run of paths that share a
-/// directory, `src/cmds/git/ diff_cmd.rs gh_cmd.rs`, with `./` standing for the top level.
+/// directory, `src/cmds/git/ diff_cmd.rs gh_cmd.rs`, with `./` standing for no directory part.
 /// Runs follow git's order, so joining each directory to each of its names gives back git's
 /// list line for line.
 ///

@@ -1708,8 +1708,12 @@ fn is_excluded(cmd: &str, excluded: &[ExcludePattern]) -> bool {
 /// Whether `cmd` is a quoted shell wrapper whose script runs a command the
 /// user opted out of, through an `RTK_DISABLED=` prefix or `exclude_commands`.
 /// A routable wrapper must not fall through to its own filter then, since that
-/// filter would see the opted-out command's output anyway. Refs: #4704.
-fn shell_wrapper_script_opts_out(cmd: &str, excluded: &[ExcludePattern]) -> bool {
+/// filter would see the opted-out command's output anyway. Nested quoted
+/// shells are inspected too, up to `MAX_PREFIX_DEPTH`. Refs: #4704.
+fn shell_wrapper_script_opts_out(cmd: &str, excluded: &[ExcludePattern], depth: usize) -> bool {
+    if depth >= MAX_PREFIX_DEPTH {
+        return false;
+    }
     let Some(wrapper) = parse_shell_wrapper(cmd) else {
         return false;
     };
@@ -1725,7 +1729,7 @@ fn shell_wrapper_script_opts_out(cmd: &str, excluded: &[ExcludePattern]) -> bool
             }
             match strip_process_wrapper_prefix(rest) {
                 Some((_, inner)) => seg = inner,
-                None => return false,
+                None => return shell_wrapper_script_opts_out(rest, excluded, depth + 1),
             }
         }
     })
@@ -1872,7 +1876,7 @@ fn rewrite_segment_inner(
             // Re-testing the wrapped form would route it through the wrapper's
             // own filter, defeating the exclusion.
             if is_excluded(ENV_PREFIX.replace(rest, "").trim(), excluded)
-                || shell_wrapper_script_opts_out(rest, excluded)
+                || shell_wrapper_script_opts_out(rest, excluded, 0)
             {
                 return None;
             }
@@ -4775,6 +4779,18 @@ mod tests {
         assert_eq!(
             rewrite_command_no_prefixes("uv run bash -c 'pytest && git status'", &excluded),
             Some("uv run bash -c 'pytest && rtk git status'".into())
+        );
+        // A nested quoted shell is inspected too.
+        assert_eq!(
+            rewrite_command_no_prefixes("uv run bash -c 'bash -c \"pytest\"'", &excluded),
+            None
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes(
+                "uv run bash -c 'bash -c \"RTK_DISABLED=1 git status\"'",
+                &[]
+            ),
+            None
         );
         // A script with nothing opted out keeps the existing fall-through.
         assert_eq!(

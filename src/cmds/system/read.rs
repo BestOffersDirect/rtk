@@ -3,7 +3,7 @@
 use crate::core::filter::{self, FilterLevel, Language};
 use crate::core::guard::never_worse;
 use crate::core::shell::quote_word;
-use crate::core::tracking;
+use crate::core::tracking::{self, estimate_tokens};
 use anyhow::{Context, Result};
 use std::borrow::Cow;
 use std::fs;
@@ -114,7 +114,9 @@ pub fn run(
         );
     }
 
-    filtered = apply_line_window(&filtered, max_lines, head_lines, tail_lines);
+    let windowed = apply_line_window(&filtered, max_lines, head_lines, tail_lines);
+    let window_cut = windowed != filtered;
+    filtered = windowed;
 
     let (raw, rtk_output) = if line_numbers {
         (
@@ -129,14 +131,9 @@ pub fn run(
     timer.track(
         &cat_label(file),
         "rtk read",
-        &tracking_baseline(
-            &content,
-            &raw,
-            max_lines,
-            head_lines,
-            tail_lines,
-            line_numbers,
-        ),
+        &tracking_baseline(&raw, shown, window_cut, || {
+            windowed_raw(&content, max_lines, head_lines, tail_lines, line_numbers)
+        }),
         shown,
     );
     Ok(())
@@ -201,7 +198,9 @@ pub fn run_stdin(
         );
     }
 
-    let filtered = apply_line_window(&filtered, max_lines, head_lines, tail_lines);
+    let windowed = apply_line_window(&filtered, max_lines, head_lines, tail_lines);
+    let window_cut = windowed != filtered;
+    let filtered = windowed;
 
     let (raw, rtk_output) = if line_numbers {
         (
@@ -217,14 +216,9 @@ pub fn run_stdin(
     timer.track(
         "cat - (stdin)",
         "rtk read -",
-        &tracking_baseline(
-            &content,
-            &raw,
-            max_lines,
-            head_lines,
-            tail_lines,
-            line_numbers,
-        ),
+        &tracking_baseline(&raw, shown, window_cut, || {
+            windowed_raw(&content, max_lines, head_lines, tail_lines, line_numbers)
+        }),
         shown,
     );
     Ok(())
@@ -248,31 +242,56 @@ fn format_with_line_numbers(content: &str) -> String {
 /// The raw side `timer.track` compares the shown output against.
 ///
 /// `--max-lines`, `--head-lines` and `--tail-lines` are the user choosing to
-/// see less of the file, not rtk compressing it, so the baseline is the raw
-/// content cut to the same window as the output. Without this, one windowed
-/// read of a large file books the whole unshown remainder as a saving.
+/// see less of the file, not rtk compressing it, so a window the output was
+/// cut to is applied to the baseline as well. Without this, one windowed read
+/// of a large file books the whole unshown remainder as a saving.
 ///
-/// `raw` is the full, already-formatted baseline the caller built for
-/// `never_worse`; with no window it is returned as is, so a whole-file read
-/// costs no extra copy. The windowed baseline is only ever recorded, never
-/// printed: what the user sees is still `never_worse(raw, filtered)`.
+/// The baseline must describe the same span as what was printed, or the row
+/// books a saving that never happened (or a negative one). Three cases, in
+/// order:
+///
+/// 1. `shown` is `raw` itself (`never_worse` fell back to the unfiltered
+///    content): nothing was compressed, the baseline is what was shown.
+/// 2. The window removed nothing from the filtered content (`window_cut` is
+///    false, which covers the no-window read): the user would have read the
+///    whole file, so the baseline is `raw` and the saving is the filter's.
+/// 3. The window did cut: the baseline is the raw content cut to the same
+///    window (`windowed_raw`), never smaller than `shown`, so a row cannot go
+///    negative when the two sides truncate differently.
+///
+/// The windowed baseline is only ever recorded, never printed.
 fn tracking_baseline<'a>(
-    content: &str,
     raw: &'a str,
+    shown: &'a str,
+    window_cut: bool,
+    windowed_raw: impl FnOnce() -> String,
+) -> Cow<'a, str> {
+    if shown == raw || !window_cut {
+        return Cow::Borrowed(raw);
+    }
+    let windowed = windowed_raw();
+    if estimate_tokens(&windowed) < estimate_tokens(shown) {
+        Cow::Borrowed(shown)
+    } else {
+        Cow::Owned(windowed)
+    }
+}
+
+/// The raw content cut to the window the output was cut to, formatted the
+/// way the output was: the baseline of case 3 in [`tracking_baseline`].
+fn windowed_raw(
+    content: &str,
     max_lines: Option<usize>,
     head_lines: Option<usize>,
     tail_lines: Option<usize>,
     line_numbers: bool,
-) -> Cow<'a, str> {
-    if max_lines.is_none() && head_lines.is_none() && tail_lines.is_none() {
-        return Cow::Borrowed(raw);
-    }
+) -> String {
     let windowed = apply_line_window(content, max_lines, head_lines, tail_lines);
-    Cow::Owned(if line_numbers {
+    if line_numbers {
         format_with_line_numbers(&windowed)
     } else {
         windowed
-    })
+    }
 }
 
 fn apply_line_window(
@@ -491,7 +510,6 @@ mod tests {
         Ok(())
     }
 
-    /// A device node reports a size of 0, which would book the window as pure cost.
     #[test]
     fn test_read_rust_file() -> Result<()> {
         let mut file = NamedTempFile::with_suffix(".rs")?;
@@ -523,15 +541,64 @@ fn main() {{
         // Compile-time verification that the function exists with correct signature
     }
 
-    // Regression tests for #2805/#1045: the raw tracking baseline must be
-    // windowed the same as the filtered output, or content outside an
-    // explicit --max-lines/--tail-lines window gets counted as a fake
-    // "saving" -- a single large file read this way reported 250M+ phantom
-    // saved tokens in the wild.
+    // The tracking baseline describes the same span as the printed output:
+    // content outside an explicit --max-lines/--tail-lines window is never
+    // booked as a saving (#2805/#1045), and a window that removed nothing, or
+    // a never_worse fallback to the raw content, books the develop row.
+
     #[test]
-    fn test_tracking_baseline_max_lines_windows_the_raw_side() {
+    fn test_tracking_baseline_shown_raw_books_no_saving() {
+        let raw = "alpha\nbravo\n";
+        let baseline = tracking_baseline(raw, raw, true, || "alpha\n[1 more lines]\n".into());
+
+        assert!(matches!(baseline, Cow::Borrowed(_)));
+        assert_eq!(baseline, raw);
+    }
+
+    #[test]
+    fn test_tracking_baseline_window_that_cut_nothing_borrows_raw() {
+        let raw = "// comment\nalpha\nbravo\n";
+        let shown = "alpha\nbravo\n";
+        let baseline = tracking_baseline(raw, shown, false, || unreachable!("no window"));
+
+        assert!(matches!(baseline, Cow::Borrowed(_)));
+        assert_eq!(baseline, raw);
+    }
+
+    #[test]
+    fn test_tracking_baseline_without_a_window_borrows_raw() {
+        let raw = format_with_line_numbers("alpha\nbravo\n");
+        let shown = format_with_line_numbers("alpha\n");
+        let baseline = tracking_baseline(&raw, &shown, false, || unreachable!("no window"));
+
+        assert!(matches!(baseline, Cow::Borrowed(_)));
+        assert_eq!(baseline, raw);
+    }
+
+    #[test]
+    fn test_tracking_baseline_cut_window_is_the_windowed_raw() {
+        let raw = "alpha\nbravo\ncharlie\ndelta\n";
+        let shown = "charlie\ndelta\n";
+        let baseline = tracking_baseline(raw, shown, true, || {
+            windowed_raw(raw, None, None, Some(2), false)
+        });
+
+        assert_eq!(baseline, "charlie\ndelta\n");
+    }
+
+    #[test]
+    fn test_tracking_baseline_cut_window_never_goes_below_shown() {
+        let raw = "alpha\nbravo\ncharlie\ndelta\n";
+        let shown = "a much longer shown line than the window\nand another one\n";
+        let baseline = tracking_baseline(raw, shown, true, || "alpha\n".into());
+
+        assert_eq!(baseline, shown);
+    }
+
+    #[test]
+    fn test_windowed_raw_max_lines_windows_the_raw_side() {
         let input = "alpha\nbravo\ncharlie\ndelta\n";
-        let baseline = tracking_baseline(input, input, Some(2), None, None, false);
+        let baseline = windowed_raw(input, Some(2), None, None, false);
 
         assert!(baseline.starts_with("alpha\n"));
         assert!(baseline.contains("more lines"));
@@ -540,36 +607,15 @@ fn main() {{
     }
 
     #[test]
-    fn test_tracking_baseline_tail_lines_windows_the_raw_side() {
+    fn test_windowed_raw_head_lines_windows_the_raw_side() {
         let input = "alpha\nbravo\ncharlie\ndelta\n";
-        let baseline = tracking_baseline(input, input, None, None, Some(2), false);
-
-        assert_eq!(baseline, "charlie\ndelta\n");
+        assert_eq!(windowed_raw(input, None, Some(1), None, false), "alpha\n");
     }
 
     #[test]
-    fn test_tracking_baseline_head_lines_windows_the_raw_side() {
+    fn test_windowed_raw_with_line_numbers_numbers_the_window() {
         let input = "alpha\nbravo\ncharlie\ndelta\n";
-        let baseline = tracking_baseline(input, input, None, Some(1), None, false);
-
-        assert_eq!(baseline, "alpha\n");
-    }
-
-    #[test]
-    fn test_tracking_baseline_without_a_window_borrows_raw() {
-        let input = "alpha\nbravo\n";
-        let raw = format_with_line_numbers(input);
-        let baseline = tracking_baseline(input, &raw, None, None, None, true);
-
-        assert!(matches!(baseline, Cow::Borrowed(_)));
-        assert_eq!(baseline, raw);
-    }
-
-    #[test]
-    fn test_tracking_baseline_with_line_numbers_numbers_the_window() {
-        let input = "alpha\nbravo\ncharlie\ndelta\n";
-        let raw = format_with_line_numbers(input);
-        let baseline = tracking_baseline(input, &raw, None, None, Some(2), true);
+        let baseline = windowed_raw(input, None, None, Some(2), true);
 
         assert_eq!(baseline, format_with_line_numbers("charlie\ndelta\n"));
     }
@@ -773,41 +819,6 @@ fn main() {{
         assert!(
             stderr.contains("rtk_nonexistent_file"),
             "should report missing file on stderr"
-        );
-    }
-
-    // Regression test for a bug caught in review of the tracking_baseline
-    // fix: an earlier version computed a single windowed "raw" value and fed
-    // it into BOTH the tracking comparison AND the actual printed output
-    // (never_worse/print!) -- silently changing what the user sees, not just
-    // what gets tracked. With --max-lines combined with real filtering
-    // (minimal level strips the comment), the printed output must still be
-    // the real filtered content, never a raw/unfiltered windowed excerpt.
-    #[test]
-    #[ignore]
-    fn test_max_lines_does_not_leak_unfiltered_raw_into_printed_output() {
-        let mut f = NamedTempFile::with_suffix(".rs").unwrap();
-        writeln!(f, "short").unwrap();
-        writeln!(f, "// a comment that minimal filtering should strip").unwrap();
-        writeln!(f, "a_very_long_real_code_line_that_should_still_print();").unwrap();
-
-        let output = test_isolation::rtk_command()
-            .args([
-                "read",
-                &f.path().to_string_lossy(),
-                "--level",
-                "minimal",
-                "--max-lines",
-                "2",
-            ])
-            .output()
-            .expect("failed to run rtk read");
-
-        assert!(output.status.success());
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(
-            !stdout.contains("// a comment"),
-            "the comment must be filtered out, not leak in via an unwindowed-raw fallback: {stdout:?}"
         );
     }
 

@@ -1,7 +1,7 @@
 //! Filters Ruff linter and formatter output.
 
 use crate::core::arg_tokenizer::{
-    Dialect, TokenKind, ValueSpec, before_dashdash, dashdash_index, tokenize_grammar,
+    Dialect, Token, TokenKind, ValueSpec, before_dashdash, tokenize_grammar,
 };
 use crate::core::args_utils;
 use crate::core::config;
@@ -128,8 +128,7 @@ fn ruff_output_is_complete(route: RuffRoute, args: &[String]) -> bool {
     match route {
         RuffRoute::TopLevel => true,
         RuffRoute::Subcommand { at } => {
-            matches!(args[at].as_str(), "help" | "version")
-                || is_analyze_graph_invocation(args)
+            matches!(args[at].as_str(), "help" | "version") || is_analyze_graph_invocation(args)
         }
         RuffRoute::Check { .. } => false,
     }
@@ -141,36 +140,57 @@ fn ruff_output_is_complete(route: RuffRoute, args: &[String]) -> bool {
 fn route_ruff_args(args: &[String]) -> RuffRoute {
     let tokens = tokenize_grammar(args, &ruff_takes_value, Dialect::Posix);
     for token in before_dashdash(&tokens) {
-        if !token.is_free_positional() {
-            continue;
-        }
-        // The first free positional decides: a known subcommand routes,
-        // anything else is a path and the invocation is an implicit check.
-        if RUFF_SUBCOMMANDS.contains(&token.text) {
-            if token.text == "check" {
-                return RuffRoute::Check {
-                    explicit_at: Some(token.source_index),
+        if token.kind == TokenKind::Positional {
+            // The separate value of a global option is not the subcommand.
+            if !token.is_free_positional() {
+                continue;
+            }
+            // The first free positional decides: a known subcommand routes,
+            // anything else is a path and the invocation is an implicit check.
+            if RUFF_SUBCOMMANDS.contains(&token.text) {
+                if token.text == "check" {
+                    return RuffRoute::Check {
+                        explicit_at: Some(token.source_index),
+                    };
+                }
+                return RuffRoute::Subcommand {
+                    at: token.source_index,
                 };
             }
-            return RuffRoute::Subcommand {
-                at: token.source_index,
-            };
+            return RuffRoute::Check { explicit_at: None };
         }
-        return RuffRoute::Check { explicit_at: None };
+        // A check-only option's value looks like a free positional to the
+        // tokenizer. Treat the whole invocation as the implicit-check form:
+        // nothing is removed and no later word is the subcommand. The `--`
+        // boundary is not an option: the scan never reads past it.
+        if token.kind != TokenKind::DashDash && !ruff_is_global_token(*token) {
+            return RuffRoute::Check { explicit_at: None };
+        }
     }
-    // No free positional before the `--` boundary: a path after it keeps the
-    // run an implicit check, because everything past the boundary is a path.
-    if dashdash_index(&tokens).is_some() && tokens.iter().any(|t| t.is_free_positional()) {
-        return RuffRoute::Check { explicit_at: None };
+    top_level_request(&tokens)
+}
+
+/// Whether `token` is one of ruff's own global options (`ruff --help`, 0.17).
+fn ruff_is_global_token(token: Token<'_>) -> bool {
+    match token.kind {
+        TokenKind::Long => {
+            RUFF_GLOBAL_VALUE_OPTIONS.contains(&token.text)
+                || RUFF_GLOBAL_FLAGS.contains(&token.text)
+        }
+        TokenKind::Short => RUFF_GLOBAL_SHORT_FLAGS.contains(&token.text),
+        _ => false,
     }
-    top_level_request(args)
 }
 
 /// Ruff's only global options that consume a separate value
-/// (`ruff --help`, 0.17: `--config` and `--color`). Every other global token
-/// is a flag; rule-selection options belong to the subcommand and only
-/// appear once the routing decision has been made.
+/// (`ruff --help`, 0.17: `--config` and `--color`).
 const RUFF_GLOBAL_VALUE_OPTIONS: &[&str] = &["config", "color"];
+
+/// Ruff's global flags, as long names without the leading dashes.
+const RUFF_GLOBAL_FLAGS: &[&str] = &["isolated", "verbose", "quiet", "silent", "help", "version"];
+
+/// The one-letter spellings of [`RUFF_GLOBAL_FLAGS`].
+const RUFF_GLOBAL_SHORT_FLAGS: &[&str] = &["v", "q", "s", "h", "V"];
 
 fn ruff_takes_value(kind: TokenKind, name: &str) -> Option<ValueSpec> {
     (kind == TokenKind::Long && RUFF_GLOBAL_VALUE_OPTIONS.contains(&name)).then(ValueSpec::value)
@@ -189,12 +209,16 @@ enum RuffRoute {
 }
 
 /// Flag-only invocations stay top-level for `--version`/`--help`; every other
-/// flags-only call (for example `--statistics`) is an implicit check.
-fn top_level_request(args: &[String]) -> RuffRoute {
-    if args
-        .iter()
-        .any(|arg| matches!(arg.as_str(), "--version" | "-V" | "--help" | "-h"))
-    {
+/// flags-only call (for example `--statistics`) is an implicit check. Read the
+/// tokens, not the raw args, so a cluster such as `-qh` is a help request.
+fn top_level_request(tokens: &[Token<'_>]) -> RuffRoute {
+    let requests_top_level = before_dashdash(tokens).iter().any(|token| {
+        matches!(
+            (token.kind, token.text),
+            (TokenKind::Long, "help" | "version") | (TokenKind::Short, "h" | "V")
+        )
+    });
+    if requests_top_level {
         RuffRoute::TopLevel
     } else {
         RuffRoute::Check { explicit_at: None }
@@ -620,8 +644,7 @@ mod tests {
 
         let raw = include_str!("../../../tests/fixtures/ruff_rule_e501_raw.txt");
         assert!(raw.len() > config::limits().passthrough_max_chars);
-        let result =
-            filter_ruff_output(&args(&["rule", "E501"]), raw);
+        let result = filter_ruff_output(&args(&["rule", "E501"]), raw);
         assert!(
             result.ends_with("...") && raw.starts_with(result.trim_end_matches("...")),
             "rule output must be a capped prefix of ruff's, got {} of {} bytes",
@@ -947,6 +970,83 @@ Would reformat: tests/test_utils.py
             &["--", "clean.py"],
             &["check", "--output-format=json", "--", "clean.py"],
         );
+    }
+
+    /// A check-only option before the first free positional makes the call
+    /// the implicit-check form: its value is never the subcommand and
+    /// nothing is removed (#3968 review item 1).
+    #[test]
+    fn ruff_check_options_before_positionals_keep_their_values() {
+        assert_plan(
+            &["--output-file", "check", "keep.py"],
+            &[
+                "check",
+                "--output-format=json",
+                "--output-file",
+                "check",
+                "keep.py",
+            ],
+        );
+        assert_plan(
+            &["--extend-exclude", "check", "src/pkg/bad.py"],
+            &[
+                "check",
+                "--output-format=json",
+                "--extend-exclude",
+                "check",
+                "src/pkg/bad.py",
+            ],
+        );
+        // `--extend-exclude config` used to end in an error on both sides.
+        assert_plan(
+            &["--extend-exclude", "config", "src/pkg/bad.py"],
+            &[
+                "check",
+                "--output-format=json",
+                "--extend-exclude",
+                "config",
+                "src/pkg/bad.py",
+            ],
+        );
+    }
+
+    #[test]
+    fn ruff_routes_color_and_later_words_per_review() {
+        // `--color` takes a value; the `check` after it is still explicit.
+        assert_plan(
+            &["--color", "never", "check", "a.py"],
+            &["check", "--output-format=json", "--color", "never", "a.py"],
+        );
+        // ... and a later `format` is the effective subcommand.
+        assert_plan(
+            &["--color", "never", "format", "--check", "a.py"],
+            &["--color", "never", "format", "--check", "a.py"],
+        );
+        // A path before a subcommand-named word keeps it a path.
+        assert_plan(
+            &["src", "format"],
+            &["check", "--output-format=json", "src", "format"],
+        );
+    }
+
+    #[test]
+    fn ruff_dashdash_and_clusters_route_per_review() {
+        // A `--` in the middle reaches the router: the word after it is a
+        // path, not a subcommand.
+        assert_plan(
+            &["--isolated", "--", "format"],
+            &[
+                "check",
+                "--output-format=json",
+                "--isolated",
+                "--",
+                "format",
+            ],
+        );
+        // Clustered help flags are top-level, and a leading `--` does not
+        // turn a help request into a check.
+        assert_plan(&["-qh"], &["-qh"]);
+        assert_plan(&["--help", "--", "path"], &["--help", "--", "path"]);
     }
 
     #[test]

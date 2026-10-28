@@ -229,6 +229,39 @@ fn max_lines_that_cuts_nothing_books_the_filter_saving() {
 }
 
 #[test]
+fn stdin_max_lines_that_cuts_nothing_books_the_filter_saving() {
+    // Minimal trims the blank lines whatever the language, leaving exactly as
+    // many lines as the window holds: the window removed nothing, so the
+    // saving is the filter's, against the whole input.
+    let text = "\n\n\n\nfn alpha() {}\nfn bravo() {}\n\n\n\n";
+    let home = home();
+    let (stdout, row) = read(
+        home.path(),
+        &["-", "--level", "minimal", "--max-lines", "2"],
+        Some(text),
+    );
+    assert_eq!(
+        stdout.lines().collect::<Vec<_>>(),
+        ["fn alpha() {}", "fn bravo() {}"],
+        "the blank lines are trimmed"
+    );
+    assert_eq!(
+        row.input,
+        tokens(text),
+        "the raw side is the whole input: {row:?}"
+    );
+    assert_eq!(
+        row.output,
+        tokens(&stdout),
+        "the output side is what was printed: {row:?}"
+    );
+    assert!(
+        row.input > row.output,
+        "the filter's saving is kept: {row:?}"
+    );
+}
+
+#[test]
 fn max_lines_that_cuts_books_the_windowed_file() {
     let text = plain_text();
     let home = home();

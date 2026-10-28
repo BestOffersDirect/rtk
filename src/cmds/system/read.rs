@@ -541,10 +541,8 @@ fn main() {{
         // Compile-time verification that the function exists with correct signature
     }
 
-    // The tracking baseline describes the same span as the printed output:
-    // content outside an explicit --max-lines/--tail-lines window is never
-    // booked as a saving (#2805/#1045), and a window that removed nothing, or
-    // a never_worse fallback to the raw content, books the develop row.
+    // What a windowed read books as its raw side (#2805/#1045): the cases are
+    // documented on `tracking_baseline`.
 
     #[test]
     fn test_tracking_baseline_shown_raw_books_no_saving() {

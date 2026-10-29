@@ -31,7 +31,8 @@ fn test_codex_uninstall_exit_codes() {
     fs::create_dir_all(&proj).expect("mkdir proj");
     fs::create_dir_all(&codex_out).expect("mkdir codex_out");
 
-    let hooks_content = "{\"hooks\":{}}";
+    // A registered RTK hook, so a refusal that is not honoured would rewrite or back it up.
+    let hooks_content = "{\"hooks\":{\"PreToolUse\":[{\"matcher\":\"Bash\",\"hooks\":[{\"type\":\"command\",\"command\":\"rtk hook codex\"}]}]}}";
 
     // Case 1: .codex symlinked outside project -> exit 2
     symlink(&codex_out, proj.join(".codex")).expect("symlink .codex");
@@ -59,13 +60,24 @@ fn test_codex_uninstall_exit_codes() {
         stderr.is_empty(),
         "stderr should not repeat report on refusal: {stderr}"
     );
-    assert!(
-        !proj.join("RTK.md").exists()
-            || fs::read_to_string(proj.join("RTK.md")).unwrap() == "my notes\n",
-        "Project cleanup still performed"
+    assert_eq!(
+        fs::read_to_string(proj.join("RTK.md")).expect("RTK.md"),
+        "my notes\n",
+        "an RTK.md RTK did not write is kept"
+    );
+    assert_eq!(
+        fs::read_to_string(proj.join("AGENTS.md")).expect("AGENTS.md"),
+        "",
+        "the rest of the project is still cleaned"
+    );
+    assert_eq!(
+        fs::read_to_string(codex_out.join("hooks.json")).expect("hooks.json"),
+        hooks_content,
+        "the hook outside the project is left alone"
     );
 
     // Case 2: refused case with --dry-run -> exit 2 and [dry-run] Nothing written footer printed
+    fs::write(proj.join("AGENTS.md"), "@RTK.md\n").expect("AGENTS.md");
     let dry_output = rtk(&proj)
         .args(["init", "--codex", "--uninstall", "--dry-run"])
         .output()
@@ -79,6 +91,11 @@ fn test_codex_uninstall_exit_codes() {
     assert!(
         dry_stdout.contains("[dry-run] Nothing written."),
         "dry-run footer should still be printed: {dry_stdout}"
+    );
+    assert_eq!(
+        fs::read_to_string(proj.join("AGENTS.md")).expect("AGENTS.md"),
+        "@RTK.md\n",
+        "a refused dry-run still writes nothing"
     );
 
     // Case 3: hooks.json.bak symlinked outside project -> exit 2
@@ -100,12 +117,47 @@ fn test_codex_uninstall_exit_codes() {
         Some(2),
         "Expected exit code 2 when hooks.json.bak is symlinked outside project"
     );
+    assert!(
+        String::from_utf8_lossy(&bak_output.stdout).contains("hooks.json.bak resolves to"),
+        "stdout should explain the refused backup: {bak_output:?}"
+    );
+    assert!(
+        !out.join("stolen.json").exists(),
+        "nothing is written through the backup symlink"
+    );
+    assert_eq!(
+        fs::read_to_string(proj.join(".codex").join("hooks.json")).expect("hooks.json"),
+        hooks_content,
+        "and the hook is left registered rather than rewritten unsafely"
+    );
+
+    // Case 4: any other uninstall failure -> exit 1
+    fs::remove_file(proj.join(".codex").join("hooks.json.bak")).expect("rm bak");
+    fs::write(proj.join(".codex").join("hooks.json"), "{not json").expect("hooks.json");
+    let failed_output = rtk(&proj)
+        .args(["init", "--codex", "--uninstall"])
+        .output()
+        .expect("run rtk invalid hooks.json");
+    assert_eq!(
+        failed_output.status.code(),
+        Some(1),
+        "Expected exit code 1 when the uninstall fails for another reason"
+    );
+    assert!(
+        String::from_utf8_lossy(&failed_output.stderr).contains(".codex/hooks.json"),
+        "the failure names the file it could not parse: {failed_output:?}"
+    );
+    assert_eq!(
+        fs::read_to_string(proj.join(".codex").join("hooks.json")).expect("read"),
+        "{not json",
+        "and leaves it untouched"
+    );
 
     // Clean up for next cases
     let _ = fs::remove_dir_all(&proj);
     fs::create_dir_all(&proj).expect("mkdir clean proj");
 
-    // Case 4: clean uninstall (nothing installed) -> exit 0
+    // Case 5: clean uninstall (nothing installed) -> exit 0
     let clean_output = rtk(&proj)
         .args(["init", "--codex", "--uninstall"])
         .output()
@@ -121,7 +173,7 @@ fn test_codex_uninstall_exit_codes() {
         "stdout should report nothing to remove: {clean_stdout}"
     );
 
-    // Case 5: normal installed then uninstalled -> exit 0
+    // Case 6: normal installed then uninstalled -> exit 0
     let install_output = rtk(&proj)
         .args(["init", "--codex"])
         .output()
@@ -136,5 +188,15 @@ fn test_codex_uninstall_exit_codes() {
         uninstall_output.status.code(),
         Some(0),
         "Expected exit code 0 for normal clean uninstall"
+    );
+    assert!(
+        String::from_utf8_lossy(&uninstall_output.stdout).contains("RTK uninstalled for Codex CLI"),
+        "the uninstall reports a removal: {uninstall_output:?}"
+    );
+    assert!(
+        !fs::read_to_string(proj.join(".codex").join("hooks.json"))
+            .expect("hooks.json")
+            .contains("rtk hook codex"),
+        "and the hook is no longer registered"
     );
 }

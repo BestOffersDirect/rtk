@@ -1,6 +1,7 @@
 #![cfg(unix)]
 
 use std::fs::{self, File};
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Output;
 
@@ -135,6 +136,64 @@ fn failed_bare_ls_prints_what_ls_printed() {
         assert_eq!(rtk.status.code(), native.status.code(), "ls {args:?}");
         assert_eq!(rtk.stdout, native.stdout, "ls {args:?}");
         assert!(!rtk.stderr.is_empty(), "ls {args:?} must keep its error");
+    }
+}
+
+#[test]
+fn an_unreadable_directory_prints_what_ls_printed() {
+    let dir = common::tempdir();
+    let locked = dir.path().join("locked");
+    fs::create_dir(&locked).expect("create dir");
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).expect("chmod");
+    for args in [&["locked"][..], &["-A", "locked"], &["-l", "locked"]] {
+        let native = native_ls(dir.path(), args);
+        if native.status.success() {
+            compare(dir.path(), args);
+            continue;
+        }
+        let rtk = rtk_ls(dir.path(), args);
+        assert_eq!(rtk.status.code(), native.status.code(), "ls {args:?}");
+        assert_eq!(rtk.stdout, native.stdout, "ls {args:?}");
+    }
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).expect("chmod");
+}
+
+#[test]
+fn a_flag_after_an_operand_is_held_to_what_ls_listed() {
+    let dir = common::tempdir();
+    home_like(dir.path());
+    for args in [&[".", "-l"][..], &[".", "-la"], &[".", "-a"]] {
+        let native = native_ls(dir.path(), args);
+        let rtk = rtk_ls(dir.path(), args);
+        assert!(
+            tokens(&rtk.stdout) <= tokens(&native.stdout),
+            "rtk ls {args:?} is larger than native ls:\n--- rtk\n{}--- ls\n{}",
+            String::from_utf8_lossy(&rtk.stdout),
+            String::from_utf8_lossy(&native.stdout)
+        );
+    }
+}
+
+#[test]
+fn options_ls_rejects_never_turn_into_an_empty_success() {
+    let dir = common::tempdir();
+    home_like(dir.path());
+    for args in [
+        &["--all"][..],
+        &["--all", "."],
+        &["-l", "--all"],
+        &["-l", "--human-readable"],
+    ] {
+        let native = native_ls(dir.path(), args);
+        if native.status.success() {
+            compare(dir.path(), args);
+            continue;
+        }
+        let rtk = rtk_ls(dir.path(), args);
+        assert!(
+            !rtk.status.success() || !rtk.stdout.is_empty(),
+            "rtk ls {args:?} succeeded with no output where ls failed"
+        );
     }
 }
 

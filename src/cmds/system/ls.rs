@@ -316,33 +316,36 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         display_args(args)
     };
 
-    let native = if show_long {
-        None
-    } else {
-        native_listing(args)
-    };
+    let native = native_listing(args);
+    let listed = native
+        .as_ref()
+        .filter(|(stdout, succeeded)| *succeeded || !stdout.is_empty())
+        .map(|(stdout, _)| stdout.as_str());
 
     runner::run_filtered_with_exit(
         cmd,
         "ls",
         &label,
-        |raw, code| match (code, native.as_deref()) {
-            (0, native) => render(raw, native, show_all, show_long, verbose),
-            (_, Some(native)) => never_worse(native, raw).to_string(),
+        |raw, code| match (code, &native) {
+            (0, _) => render(raw, listed, show_all, show_long, verbose),
+            (_, Some((native, _))) => never_worse(native, raw).to_string(),
             (_, None) => raw.to_string(),
         },
         RunOptions::stdout_only().no_trailing_newline(),
     )
 }
 
-fn native_listing(args: &[String]) -> Option<String> {
+fn native_listing(args: &[String]) -> Option<(String, bool)> {
     let output = resolved_command("ls")
         .child_args(args)
         .stdin(Stdio::null())
         .stderr(Stdio::null())
         .output()
         .ok()?;
-    Some(String::from_utf8_lossy(&output.stdout).into_owned())
+    Some((
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        output.status.success(),
+    ))
 }
 
 fn render(raw: &str, native: Option<&str>, show_all: bool, show_long: bool, verbose: u8) -> String {
@@ -1406,12 +1409,18 @@ mod tests {
     }
 
     #[test]
-    fn test_render_long_listing_is_not_held_to_native() {
+    fn test_render_long_listing_keeps_compact_when_it_saves() {
         let raw = format!("{}{}", long_line('d', "src"), long_line('-', "a.rs"));
-        assert_eq!(
-            render(&raw, None, false, true, 0),
-            "644  src/\n644  a.rs  1.2K\n"
-        );
+        let compact = "644  src/\n644  a.rs  1.2K\n";
+        assert_eq!(render(&raw, Some(&raw), false, true, 0), compact);
+        assert_eq!(render(&raw, None, false, true, 0), compact);
+    }
+
+    #[test]
+    fn test_render_long_listing_is_held_to_native() {
+        let raw = format!("{}{}", long_line('d', "src"), long_line('-', "a.rs"));
+        let native = "a.rs\n";
+        assert_eq!(render(&raw, Some(native), false, true, 0), native);
     }
 
     #[test]

@@ -446,11 +446,14 @@ fn dotnet_test_solution_root_reads_reported_trx_paths_and_retains_files() {
   <ResultSummary><Counters total="1" executed="1" passed="0" failed="1" /></ResultSummary>
   <Results><UnitTestResult testName="Tests2.UnitTest1.FailsOnDemand" outcome="Failed"><Output><ErrorInfo><Message>asked to fail two</Message><StackTrace>at Tests2.UnitTest1.FailsOnDemand()</StackTrace></ErrorInfo></Output></UnitTestResult></Results>
 </TestRun>"#;
-    let fallback_contents = r#"<?xml version="1.0" encoding="utf-8"?><TestRun><ResultSummary><Counters total="1" executed="1" passed="1" failed="0" /></ResultSummary><Results><UnitTestResult testName="Fallback.Tests.ShouldNotWin" outcome="Passed" /></Results></TestRun>"#;
+    let fallback_contents = r#"<?xml version="1.0" encoding="utf-8"?><TestRun><ResultSummary><Counters total="1" executed="1" passed="0" failed="1" /></ResultSummary><Results><UnitTestResult testName="Fallback.Tests.ShouldNotWin" outcome="Failed"><Output><ErrorInfo><Message>fallback must not win</Message></ErrorInfo></Output></UnitTestResult></Results></TestRun>"#;
     let path_with_stub = install_dotnet_stub(
         dir.path(),
         &format!(
-            "mkdir -p {} {} {}\nprintf '%s' {} > {}\nprintf '%s' {} > {}\nprintf '%s' {} > {}\nprintf '%s\\n' 'Failed!' 'Total tests: 2' 'Results File: {}' 'Results File: {}' 'Results File: {}' 'Results File: {}'\nprintf '%s\\n' '[xUnit.net 00:00:00.01] Tests.UnitTest1.FailsOnDemand [FAIL]' 'asked to fail one' '[xUnit.net 00:00:00.01] Tests2.UnitTest1.FailsOnDemand [FAIL]' 'asked to fail two' >&2\nexit 1",
+            // RTK skips a report whose mtime is older than the time it took before spawning
+            // dotnet, and a file's mtime can trail that clock by a scheduler tick on Linux. A
+            // real test run writes its reports long after; the stub waits to do the same.
+            "sleep 0.1\nmkdir -p {} {} {}\nprintf '%s' {} > {}\nprintf '%s' {} > {}\nprintf '%s' {} > {}\nprintf '%s\\n' 'Failed!' 'Total tests: 2' 'Results File: {}' 'Results File: {}' 'Results File: {}' 'Results File: {}'\nprintf '%s\\n' '[xUnit.net 00:00:00.01] Tests.UnitTest1.FailsOnDemand [FAIL]' 'asked to fail one' '[xUnit.net 00:00:00.01] Tests2.UnitTest1.FailsOnDemand [FAIL]' 'asked to fail two' >&2\nexit 1",
             shell_quote(
                 &first_trx
                     .parent()
@@ -500,6 +503,7 @@ fn dotnet_test_solution_root_reads_reported_trx_paths_and_retains_files() {
     assert!(shown.contains("Tests2.UnitTest1.FailsOnDemand"), "{shown}");
     assert!(shown.contains("asked to fail one"), "{shown}");
     assert!(shown.contains("asked to fail two"), "{shown}");
+    assert!(shown.contains("0 passed, 2 failed"), "{shown}");
     assert!(shown.contains("in 2 projects"), "{shown}");
     assert!(!shown.contains("Fallback.Tests.ShouldNotWin"), "{shown}");
     assert!(first_trx.exists(), "native first TRX was removed");

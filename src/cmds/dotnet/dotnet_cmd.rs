@@ -554,7 +554,7 @@ fn find_reported_trx_paths(raw: &str) -> Vec<PathBuf> {
         let Some(path) = fragment.lines().next() else {
             continue;
         };
-        let path = PathBuf::from(path.trim().trim_matches('"'));
+        let path = PathBuf::from(path.trim());
         if !path
             .extension()
             .is_some_and(|extension| extension.eq_ignore_ascii_case("trx"))
@@ -3197,11 +3197,29 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_reported_trx_files_counts_a_project_whose_filter_matched_nothing() {
+        // `--filter` that matches only one project of a solution: dotnet still writes and
+        // reports a zero-test TRX for the other project.
+        let temp_dir = test_isolation::tempdir();
+        let empty = temp_dir.path().join("empty.trx");
+        let ran = temp_dir.path().join("ran.trx");
+        fs::write(&empty, trx_with_counts(0, 0, 0)).expect("write empty trx");
+        fs::write(&ran, trx_with_counts(2, 1, 1)).expect("write ran trx");
+
+        let summary =
+            parse_reported_trx_files(&[empty, ran], UNIX_EPOCH).expect("both reports parse");
+
+        assert_eq!(summary.project_count, 2);
+        assert_eq!((summary.total, summary.passed, summary.failed), (2, 1, 1));
+    }
+
+    #[test]
     fn test_find_reported_trx_paths_scans_adjacent_markers_and_deduplicates() {
         let paths = find_reported_trx_paths(
             "Results File: /tmp/first.trxResults File: /tmp/second.trx\n\
              Results File: /tmp/first.trx\n\
-             Results File: /tmp/ignored.txt\n",
+             Results File: /tmp/ignored.txt\n\
+             Results File: C:\\a b\\third.trx\r\n",
         );
 
         assert_eq!(
@@ -3209,6 +3227,7 @@ mod tests {
             vec![
                 PathBuf::from("/tmp/first.trx"),
                 PathBuf::from("/tmp/second.trx"),
+                PathBuf::from("C:\\a b\\third.trx"),
             ]
         );
     }
@@ -3335,20 +3354,26 @@ mod tests {
 
     #[test]
     fn test_resolve_trx_results_dir_user_directory_is_not_marked_for_cleanup() {
-        let args = vec![
-            "--results-directory".to_string(),
-            "/custom/results".to_string(),
-            "--logger".to_string(),
-            "trx".to_string(),
-        ];
-
-        let (dir, cleanup) = resolve_trx_results_dir(
-            "test",
-            &tokenize_dotnet_args(&args),
-            TestRunnerMode::Classic,
-        );
-        assert_eq!(dir, Some(PathBuf::from("/custom/results")));
-        assert!(!cleanup);
+        for args in [
+            vec![
+                "--results-directory".to_string(),
+                "/custom/results".to_string(),
+            ],
+            vec![
+                "--results-directory".to_string(),
+                "/custom/results".to_string(),
+                "--logger".to_string(),
+                "trx".to_string(),
+            ],
+        ] {
+            let (dir, cleanup) = resolve_trx_results_dir(
+                "test",
+                &tokenize_dotnet_args(&args),
+                TestRunnerMode::Classic,
+            );
+            assert_eq!(dir, Some(PathBuf::from("/custom/results")), "{args:?}");
+            assert!(!cleanup, "{args:?}");
+        }
     }
 
     #[test]

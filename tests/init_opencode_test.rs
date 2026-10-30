@@ -299,3 +299,94 @@ fn claude_setup_survives_opencode_install_failure() {
         "the OpenCode-side error must be reported:\n{stderr}"
     );
 }
+
+/// Without `--opencode` the plugin is not written, even with OpenCode on PATH.
+/// The same stub, run with `--opencode`, does write it: the negative is live.
+#[test]
+fn no_opencode_flag_installs_no_plugin() {
+    let home = tempfile::tempdir().unwrap();
+    let path = path_with_opencode(home.path(), Some("1.18.29"));
+
+    let out = rtk(home.path())
+        .env("PATH", &path)
+        .args(["init", "-g", "--auto-patch"])
+        .output()
+        .unwrap();
+
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        claude_hook_registered(home.path()),
+        "the Claude hook must be registered, so the run did its work"
+    );
+    assert!(
+        !plugin(home.path()).exists(),
+        "plugin written without --opencode"
+    );
+
+    let control = tempfile::tempdir().unwrap();
+    let out = rtk(control.path())
+        .env("PATH", path_with_opencode(control.path(), Some("1.18.29")))
+        .args(["init", "-g", "--opencode", "--auto-patch"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        plugin(control.path()).exists(),
+        "the same stub with --opencode must write the plugin"
+    );
+}
+
+/// Both targets fail: the command reports each cause, and the plugin path is
+/// not claimed as installed. A regular file where the OpenCode directory
+/// should be makes the plugin write fail for every uid, root included.
+#[test]
+fn both_failures_are_reported() {
+    let home = tempfile::tempdir().unwrap();
+    let claude_dir = home.path().join(".claude");
+    std::fs::create_dir_all(&claude_dir).unwrap();
+    std::fs::write(
+        claude_dir.join("CLAUDE.md"),
+        "<!-- rtk-instructions\nno closing marker\n",
+    )
+    .unwrap();
+    let config_dir = home.path().join(".config");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(config_dir.join("opencode"), "not a directory").unwrap();
+
+    let out = rtk(home.path())
+        .args(["init", "-g", "--opencode", "--claude-md"])
+        .output()
+        .unwrap();
+
+    assert!(!out.status.success(), "both failures must fail the command");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("OpenCode install failed"), "{stderr}");
+    assert!(
+        stderr.contains("Failed to create OpenCode plugin directory"),
+        "the OpenCode cause must be reported:\n{stderr}"
+    );
+    assert!(stderr.contains("Agent install failed"), "{stderr}");
+    assert!(
+        stderr.contains("Refusing to modify malformed"),
+        "the agent cause must be reported:\n{stderr}"
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    for claim in [
+        "OpenCode plugin installed",
+        "plugins/rtk.ts",
+        "Restart OpenCode",
+    ] {
+        assert!(
+            !stdout.contains(claim),
+            "a failed plugin write must not be reported ({claim}):\n{stdout}"
+        );
+    }
+}

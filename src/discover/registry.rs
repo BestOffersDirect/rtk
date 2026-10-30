@@ -4204,6 +4204,23 @@ mod tests {
                 "yadm -c core.quotePath=false ls-tree -r --name-only HEAD | cat",
                 None,
             ),
+            (
+                "git  -C src ls-tree -r -z --name-only HEAD | head -5",
+                Some("rtk git -C src ls-tree -r -z --name-only HEAD | head -5"),
+            ),
+            ("git  -C src ls-tree -r --name-only HEAD | head -5", None),
+            (
+                "git  -c core.quotePath=false ls-tree -r --name-only HEAD | cat",
+                None,
+            ),
+            (
+                "git show --name-only HEAD | head -5",
+                Some("rtk git show --name-only HEAD | head -5"),
+            ),
+            (
+                "git diff --name-status HEAD~3 | cat",
+                Some("rtk git diff --name-status HEAD~3 | cat"),
+            ),
             ("git\tls-tree -r --name-only HEAD | cat", None),
             (
                 "git ls-tree -r --name-only HEAD | while read f; do echo \"$f\"; done",

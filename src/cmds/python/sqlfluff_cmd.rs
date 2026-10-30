@@ -708,6 +708,12 @@ mod tests {
                 &["lint", "--format", "json", "--dialect", "parse", "file.sql"],
                 true,
             ),
+            (
+                "long option named like a subcommand",
+                &["--format", "human", "file.sql"],
+                &["lint", "--format", "human", "file.sql"],
+                false,
+            ),
             ("short help", &["-h"], &["-h"], false),
             ("long help", &["--help"], &["--help"], false),
             ("version", &["--version"], &["--version"], false),

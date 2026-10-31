@@ -74,6 +74,7 @@ impl HookSandbox {
         })
     }
 
+    #[cfg(unix)]
     fn cursor(&self, command: &str) -> Value {
         self.run(
             "cursor",
@@ -94,6 +95,7 @@ impl HookSandbox {
         )
     }
 
+    #[cfg(unix)]
     fn cursor_settings(&self) -> PathBuf {
         self.home.join(".cursor/cli-config.json")
     }
@@ -211,6 +213,9 @@ fn codex_status_handles_global_and_local_empty_bom_and_invalid_files() {
 }
 
 #[test]
+// Cursor's settings live under the home directory, and dirs::home_dir uses the
+// Windows Known Folder API, so HOME cannot point the hook at this sandbox there.
+#[cfg(unix)]
 fn cursor_settings_keep_missing_and_empty_behavior_but_step_aside_on_failures() {
     let sandbox = HookSandbox::new();
 

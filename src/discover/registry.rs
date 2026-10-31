@@ -4775,6 +4775,21 @@ mod tests {
             rewrite_command_no_prefixes("uv run sh -c \"FOO=1 RTK_DISABLED=1 git status\"", &[]),
             None
         );
+        // The exclusion is matched past an env prefix.
+        assert_eq!(
+            rewrite_command_no_prefixes("uv run bash -c 'FOO=1 pytest'", &excluded),
+            None
+        );
+        // Every segment of the script is read, not only the first, and past a
+        // pipe in an earlier segment.
+        assert_eq!(
+            rewrite_command_no_prefixes("uv run bash -c 'echo hi; pytest'", &excluded),
+            None
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("uv run bash -c 'echo hi | head -1; pytest'", &excluded),
+            None
+        );
         // The script's other commands are still rewritten in place.
         assert_eq!(
             rewrite_command_no_prefixes("uv run bash -c 'pytest && git status'", &excluded),

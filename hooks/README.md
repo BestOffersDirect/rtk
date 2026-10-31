@@ -32,7 +32,7 @@ Agent runs command (e.g., "cargo test --nocapture")
   -> Filtered output reaches LLM
 ```
 
-All rewrite logic lives in the `rtk` binary. External hook scripts call `rtk rewrite`; native Rust hook processors call the registry directly. This keeps one source of truth for all 70+ rewrite patterns.
+All rewrite logic lives in the `rtk` binary. External hook scripts call `rtk rewrite`; native Rust hook processors call the registry directly. This keeps one source of truth for all rewrite patterns.
 
 ## Directory Structure
 

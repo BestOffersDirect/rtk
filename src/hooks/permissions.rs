@@ -989,6 +989,56 @@ mod tests {
         assert!(deny.is_empty() && ask.is_empty() && allow.is_empty());
     }
 
+    /// `claude_hook_deny_rules` permits the fish wrap only when the scan saw
+    /// every file and no deny entry. A path under a regular file, or a file
+    /// holding nothing but a BOM and whitespace, hides no rule and must keep
+    /// the scan attested; a file RTK could not read or parse must not.
+    #[test]
+    fn test_files_holding_no_rules_leave_the_settings_scan_attested() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = |name: &str| {
+            let dir = tmp.path().join(name);
+            std::fs::create_dir(&dir).expect("create dir");
+            dir
+        };
+        let scan_of = |path: &std::path::Path| {
+            let mut scan = SettingsScan::default();
+            let rules = load_permission_rules_tracking(&[path.to_path_buf()], &mut scan);
+            (rules, scan)
+        };
+
+        let not_a_dir = tmp.path().join(".claude");
+        std::fs::write(&not_a_dir, "regular file content").expect("write file");
+        let bom = dir("bom").join("settings.local.json");
+        std::fs::write(&bom, b"\xEF\xBB\xBF").expect("write settings");
+        let bom_whitespace = dir("bom_whitespace").join("settings.local.json");
+        std::fs::write(&bom_whitespace, b"\xEF\xBB\xBF  \r\n").expect("write settings");
+        for path in [not_a_dir.join("settings.json"), bom, bom_whitespace] {
+            let (_, scan) = scan_of(&path);
+            assert!(scan.every_file_read, "{} marked unread", path.display());
+        }
+
+        let unparseable = dir("unparseable").join("settings.json");
+        std::fs::write(&unparseable, b"\xEF\xBB\xBF{").expect("write settings");
+        let unreadable = dir("unreadable").join("settings.json");
+        std::fs::create_dir(&unreadable).expect("create dir");
+        for path in [unparseable, unreadable] {
+            let (_, scan) = scan_of(&path);
+            assert!(!scan.every_file_read, "{} marked read", path.display());
+        }
+
+        let bom_deny = dir("bom_deny").join("settings.json");
+        std::fs::write(
+            &bom_deny,
+            b"\xEF\xBB\xBF{\"permissions\":{\"deny\":[\"Bash(rm *)\"]}}",
+        )
+        .expect("write settings");
+        let ((deny, _, _), scan) = scan_of(&bom_deny);
+        assert_eq!(deny, ["rm *"], "a BOM before rules dropped them");
+        assert!(scan.every_file_read, "a BOM before rules marked unread");
+        assert!(scan.any_deny_entry, "a BOM before rules hid the deny");
+    }
+
     #[test]
     fn test_parse_bash_pattern() {
         assert_eq!(
